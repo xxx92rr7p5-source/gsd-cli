@@ -22,8 +22,8 @@
 **Plans:** 2 plans
 
 Plans:
-- [ ] 01-01-PLAN.md — Script skeleton with CLI framework, flags, colors, utilities, help/version
-- [ ] 01-02-PLAN.md — Status dashboard with data layer, stuck detection, formatting, JSON output
+- [x] 01-01-PLAN.md — Script skeleton with CLI framework, flags, colors, utilities, help/version
+- [x] 01-02-PLAN.md — Status dashboard with data layer, stuck detection, formatting, JSON output
 
 **Success criteria:** `gsd` (no args) prints a dashboard with running/stuck/queued/completed summary. `gsd --json` outputs valid JSON. `gsd --help` prints usage. Runs in < 2 seconds.
 
@@ -42,6 +42,11 @@ Plans:
 - `gsd stuck --kill` / `-k`: kill stuck processes (SIGTERM only), confirmation prompt, `--force` / `-f` to skip
 - PID liveness verification and stale PID file cleanup
 - `--json` output for both commands
+
+**Plans:** 1 plan
+
+Plans:
+- [ ] 02-01-PLAN.md — Complete cmd_queue and cmd_stuck implementations
 
 **Success criteria:** `gsd queue` displays QUEUE.md items by section. `gsd stuck` finds processes exceeding threshold with stale logs. `gsd stuck --kill --force` sends SIGTERM to stuck processes and cleans up.
 
