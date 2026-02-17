@@ -46,7 +46,7 @@ Plans:
 **Plans:** 1 plan
 
 Plans:
-- [ ] 02-01-PLAN.md — Complete cmd_queue and cmd_stuck implementations
+- [x] 02-01-PLAN.md — Complete cmd_queue and cmd_stuck implementations
 
 **Success criteria:** `gsd queue` displays QUEUE.md items by section. `gsd stuck` finds processes exceeding threshold with stale logs. `gsd stuck --kill --force` sends SIGTERM to stuck processes and cleans up.
 
@@ -65,5 +65,10 @@ Plans:
 - `chmod +x gsd` enforced
 - Final pass: edge cases, error message polish, help text completeness
 - `--json` output for `gsd log`
+
+**Plans:** 1 plan
+
+Plans:
+- [ ] 03-01-PLAN.md — Fix get_sessions() bug, implement cmd_log, cmd_tail, create install.sh, final polish
 
 **Success criteria:** `gsd log my-session` prints readable session transcript. `gsd tail my-session` streams live output and exits cleanly on Ctrl-C. `./install.sh` produces a working `gsd` command from any terminal. All requirements in §1–§10 are met.

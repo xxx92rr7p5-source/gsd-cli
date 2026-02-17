@@ -2,20 +2,20 @@
 
 ## Current Position
 
-Phase: 2 of 3 (Queue & Stuck Commands)
-Plan: 0/1 ready to execute — Phase 2 planned
-Status: Phase 1 approved; Phase 2 research + plan complete, ready to execute
+Phase: 3 of 3 (Log, Tail & Installation)
+Plan: 0/1 ready to execute — Phase 3 planned
+Status: Phases 1+2 complete; Phase 3 research + plan complete, ready to execute
 Last activity: 2026-02-17
 
-Progress: [███░░░░░░░] 33% (Phase 1 complete, Phase 2 planned)
+Progress: [██████░░░░] 66% (Phases 1+2 complete, Phase 3 planned)
 
 ## Phase Progress
 
 | Phase | Name | Status |
 |-------|------|--------|
 | 1 | Foundation & Status Dashboard | ✅ Complete |
-| 2 | Queue & Stuck Commands | 📋 Planned (02-01-PLAN.md ready) |
-| 3 | Log, Tail & Installation | ⏳ Not started |
+| 2 | Queue & Stuck Commands | ✅ Complete |
+| 3 | Log, Tail & Installation | 📋 Planned (03-01-PLAN.md ready) |
 
 ## Decisions Made
 
@@ -36,6 +36,14 @@ Progress: [███░░░░░░░] 33% (Phase 1 complete, Phase 2 planne
 | 01 | 01 | ~15 min | 2/2 | 1 created |
 | 01 | 02 | ~20 min | 2/2 + checkpoint | 1 modified |
 
+## Decisions Made (Phase 3 additions)
+
+- Phase 3: opencode session list --json is WRONG flag; correct is --format json (live verified)
+- Phase 3: opencode session list JSON has no `status` field — running detection via PID files only
+- Phase 3: inotifywait not available on this system — gsd tail uses `tail -f` directly
+- Phase 3: gsd log accepts session `title` or `id` (both looked up via get_sessions())
+- Phase 3: single plan for all Phase 3 deliverables (log, tail, install, bug fixes, polish)
+
 ## Stopped At
 
-Ready to execute: 02-01-PLAN.md — Phase 2 plan ready for execution
+Ready to execute: 03-01-PLAN.md — Phase 3 plan ready for execution
