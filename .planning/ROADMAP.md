@@ -19,6 +19,12 @@
 - Per-subcommand `-h`/`--help` support
 - Environment variable overrides: `GSD_QUEUE_FILE`, `GSD_LOG_DIR`, `GSD_STUCK_THRESHOLD`, `NO_COLOR`
 
+**Plans:** 2 plans
+
+Plans:
+- [ ] 01-01-PLAN.md — Script skeleton with CLI framework, flags, colors, utilities, help/version
+- [ ] 01-02-PLAN.md — Status dashboard with data layer, stuck detection, formatting, JSON output
+
 **Success criteria:** `gsd` (no args) prints a dashboard with running/stuck/queued/completed summary. `gsd --json` outputs valid JSON. `gsd --help` prints usage. Runs in < 2 seconds.
 
 ---
