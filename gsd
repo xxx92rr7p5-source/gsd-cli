@@ -1064,7 +1064,7 @@ cmd_log() {
   ' 2>/dev/null)
 }
 
-# cmd_tail — live-follow a session's output
+# cmd_tail — live-follow a running session's output log
 cmd_tail() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1075,13 +1075,29 @@ cmd_tail() {
     esac
   done
 
+  # §2.5.1 — require session name positional argument
   local session="${1:-}"
   if [[ -z "${session}" ]]; then
     die_usage "Missing required argument: <session>"
   fi
 
-  printf 'Following session: %s\n' "${session}"
-  printf 'Live tail coming in a future plan\n'
+  local log_file="${LOG_DIR}/gsd-${session}.log"
+
+  # §2.5.5 — error if log file does not exist
+  if [[ ! -f "${log_file}" ]]; then
+    die "No log file found for session '${session}': ${log_file}"
+  fi
+
+  # §2.5.4 — clean Ctrl-C exit with trap
+  # shellcheck disable=SC2064
+  trap "printf '\n%sStopped following: %s%s\n' '${DIM}' '${session}' '${RESET}'; exit 0" INT
+
+  printf '%sFollowing session: %s%s\n' "${BOLD}" "${session}" "${RESET}"
+  printf '%s%s%s\n' "${DIM}" "$(printf '%.0s─' {1..60})" "${RESET}"
+  printf '%s(Ctrl-C to stop)%s\n\n' "${DIM}" "${RESET}"
+
+  # §2.5.3 — use tail -f for live following (inotifywait not available on this system)
+  tail -f "${log_file}"
 }
 
 # ── Usage / Help ───────────────────────────────────────────────────────────────
