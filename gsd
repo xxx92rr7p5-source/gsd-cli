@@ -409,12 +409,14 @@ queue_usage() {
   printf '%sUsage:%s %s queue [options]\n\n' "${BOLD}" "${RESET}" "${PROG_NAME}"
   printf 'Pretty-print the QUEUE.md pipeline task list.\n\n'
   printf '%sOptions:%s\n' "${BOLD}" "${RESET}"
+  printf '  %-20s %s\n' '--json'        'Output as JSON'
   printf '  %-20s %s\n' '-h, --help'    'Show this help message'
   printf '\n%sEnvironment:%s\n' "${BOLD}" "${RESET}"
   printf '  %-20s %s\n' 'GSD_QUEUE_FILE' "Path to QUEUE.md (default: ~/dev/punchlab/QUEUE.md)"
   printf '\n%sExamples:%s\n' "${BOLD}" "${RESET}"
   printf '  %s queue\n' "${PROG_NAME}"
   printf '  %s q\n' "${PROG_NAME}"
+  printf '  %s queue --json | jq .items\n' "${PROG_NAME}"
 }
 
 stuck_usage() {
@@ -424,11 +426,13 @@ stuck_usage() {
   printf '  %-26s %s\n' '-t, --threshold <minutes>' "Override stuck threshold (default: ${STUCK_THRESHOLD_MIN})"
   printf '  %-26s %s\n' '-k, --kill'                'Kill all detected stuck processes (with confirmation)'
   printf '  %-26s %s\n' '-f, --force'               'Skip confirmation when killing'
+  printf '  %-26s %s\n' '--json'                    'Output as JSON'
   printf '  %-26s %s\n' '-h, --help'                'Show this help message'
   printf '\n%sExamples:%s\n' "${BOLD}" "${RESET}"
   printf '  %s stuck\n' "${PROG_NAME}"
   printf '  %s stuck --threshold 60\n' "${PROG_NAME}"
   printf '  %s stuck --kill --force\n' "${PROG_NAME}"
+  printf '  %s stuck --json | jq .stuck\n' "${PROG_NAME}"
 }
 
 log_usage() {
@@ -468,6 +472,11 @@ cmd_status() {
     case "$1" in
       --verbose|-v) verbose=true; shift ;;
       --help|-h)    status_usage; return 0 ;;
+      --json)
+        JSON_OUTPUT=true
+        RED='' GREEN='' YELLOW='' BLUE='' CYAN=''
+        BOLD='' DIM='' BOLD_RED='' RESET=''
+        shift ;;
       --)           shift; break ;;
       -*)           die_usage "Unknown option for 'status': $1" ;;
       *)            break ;;
@@ -1129,6 +1138,7 @@ usage() {
   printf '  %s --json | jq .summary  # Machine-readable output\n' "${PROG_NAME}"
   printf '  %s stuck --kill          # Kill stuck sessions\n' "${PROG_NAME}"
   printf '  %s log my-session        # View session transcript\n' "${PROG_NAME}"
+  printf '  %s tail my-session       # Stream live session output\n' "${PROG_NAME}"
 }
 
 # ── Main Dispatch ──────────────────────────────────────────────────────────────
