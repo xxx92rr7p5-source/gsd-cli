@@ -654,55 +654,129 @@ cmd_queue() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --help|-h) queue_usage; return 0 ;;
+      --json)
+        JSON_OUTPUT=true
+        # Disable colors in JSON mode (§3.1.5)
+        RED='' GREEN='' YELLOW='' BLUE='' CYAN=''
+        BOLD='' DIM='' BOLD_RED='' RESET=''
+        shift ;;
       --)        shift; break ;;
       -*)        die_usage "Unknown option for 'queue': $1" ;;
       *)         break ;;
     esac
   done
 
-  printf '%sQueue: %s%s\n' "${BOLD}" "${QUEUE_FILE}" "${RESET}"
-  printf '%s%s%s\n\n' "${DIM}" "$(printf '%.0s─' {1..60})" "${RESET}"
-
+  # File check MUST come before any display output (§2.2.6)
   if [[ ! -f "${QUEUE_FILE}" ]]; then
     die "Queue file not found: ${QUEUE_FILE}"
   fi
 
-  local current_section=""
-  local line
+  # JSON output branch (§3.5 + §2.2)
+  if [[ "${JSON_OUTPUT:-false}" == "true" ]]; then
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    local items_json
+    items_json=$(get_queue_items | \
+      jq -Rr 'split("\t") | if length >= 2 then {status: .[0], name: .[1], description: (.[2] // "")} else empty end' | \
+      jq -sc '.')
+    jq -n \
+      --arg timestamp "${timestamp}" \
+      --arg queue_file "${QUEUE_FILE}" \
+      --argjson items "${items_json}" \
+      '{timestamp: $timestamp, queue_file: $queue_file, items: $items}'
+    return 0
+  fi
 
-  while IFS= read -r line; do
-    if [[ "${line}" =~ ^##[[:space:]]+(.+)$ ]]; then
-      current_section="${BASH_REMATCH[1]}"
-      printf '\n%s%s%s\n' "${BOLD}" "${current_section}" "${RESET}"
-      continue
-    fi
+  # Human-readable output
+  printf '%sQueue: %s%s\n' "${BOLD}" "${QUEUE_FILE}" "${RESET}"
+  printf '%s%s%s\n\n' "${DIM}" "$(printf '%.0s─' {1..60})" "${RESET}"
 
-    if [[ "${line}" =~ ^-[[:space:]]+\[([[:space:]xX])\][[:space:]]+(.+)$ ]]; then
-      local checkbox="${BASH_REMATCH[1]}"
-      local description="${BASH_REMATCH[2]}"
-      local color icon
+  local in_progress_items=()
+  local queued_items=()
+  local done_items=()
+  local failed_items=()
 
-      case "${current_section}" in
-        "In Progress"|"in progress")
-          color="${GREEN}"; icon="⟳" ;;
-        "Queued"|"queued"|"To Do")
-          color="${YELLOW}"; icon="○" ;;
-        "Done"|"done"|"Completed")
-          color="${DIM}"; icon="✓" ;;
-        "Failed"|"failed")
-          color="${RED}"; icon="✗" ;;
-        *)
-          if [[ "${checkbox}" == " " ]]; then
-            color="${YELLOW}"; icon="○"
-          else
-            color="${DIM}"; icon="✓"
-          fi
-          ;;
-      esac
+  # Collect items from get_queue_items into section arrays
+  # Use process substitution — NOT pipe-to-while (Pitfall #2)
+  local q_status q_name q_desc
+  while IFS=$'\t' read -r q_status q_name q_desc; do
+    case "${q_status}" in
+      in_progress) in_progress_items+=("${q_name}"$'\t'"${q_desc}") ;;
+      queued)      queued_items+=("${q_name}"$'\t'"${q_desc}") ;;
+      done)        done_items+=("${q_name}"$'\t'"${q_desc}") ;;
+      failed)      failed_items+=("${q_name}"$'\t'"${q_desc}") ;;
+    esac
+  done < <(get_queue_items)
 
-      printf '  %s%s %s%s\n' "${color}" "${icon}" "${description}" "${RESET}"
-    fi
-  done < "${QUEUE_FILE}"
+  # Print each non-empty section
+  local section_name item short_name item_desc
+  if [[ ${#in_progress_items[@]} -gt 0 ]]; then
+    print_header "In Progress"
+    for item in "${in_progress_items[@]}"; do
+      short_name=$(truncate_str "${item%%$'\t'*}" 30)
+      item_desc="${item#*$'\t'}"
+      if [[ -n "${item_desc}" ]]; then
+        printf '  %s⟳ %s: %s%s\n' "${GREEN}" "${short_name}" "${item_desc}" "${RESET}"
+      else
+        printf '  %s⟳ %s%s\n' "${GREEN}" "${short_name}" "${RESET}"
+      fi
+    done
+    printf '\n'
+  fi
+
+  if [[ ${#queued_items[@]} -gt 0 ]]; then
+    print_header "Queued"
+    for item in "${queued_items[@]}"; do
+      short_name=$(truncate_str "${item%%$'\t'*}" 30)
+      item_desc="${item#*$'\t'}"
+      if [[ -n "${item_desc}" ]]; then
+        printf '  %s○ %s: %s%s\n' "${YELLOW}" "${short_name}" "${item_desc}" "${RESET}"
+      else
+        printf '  %s○ %s%s\n' "${YELLOW}" "${short_name}" "${RESET}"
+      fi
+    done
+    printf '\n'
+  fi
+
+  if [[ ${#done_items[@]} -gt 0 ]]; then
+    print_header "Done"
+    for item in "${done_items[@]}"; do
+      short_name=$(truncate_str "${item%%$'\t'*}" 30)
+      item_desc="${item#*$'\t'}"
+      if [[ -n "${item_desc}" ]]; then
+        printf '  %s✓ %s: %s%s\n' "${DIM}" "${short_name}" "${item_desc}" "${RESET}"
+      else
+        printf '  %s✓ %s%s\n' "${DIM}" "${short_name}" "${RESET}"
+      fi
+    done
+    printf '\n'
+  fi
+
+  if [[ ${#failed_items[@]} -gt 0 ]]; then
+    print_header "Failed"
+    for item in "${failed_items[@]}"; do
+      short_name=$(truncate_str "${item%%$'\t'*}" 30)
+      item_desc="${item#*$'\t'}"
+      if [[ -n "${item_desc}" ]]; then
+        printf '  %s✗ %s: %s%s\n' "${RED}" "${short_name}" "${item_desc}" "${RESET}"
+      else
+        printf '  %s✗ %s%s\n' "${RED}" "${short_name}" "${RESET}"
+      fi
+    done
+    printf '\n'
+  fi
+
+  # No items found case
+  if [[ ${#in_progress_items[@]} -eq 0 ]] && \
+     [[ ${#queued_items[@]} -eq 0 ]] && \
+     [[ ${#done_items[@]} -eq 0 ]] && \
+     [[ ${#failed_items[@]} -eq 0 ]]; then
+    printf '%sNo items found in %s%s\n' "${DIM}" "${QUEUE_FILE}" "${RESET}"
+  fi
+
+  # Summary line
+  local active_count=$(( ${#in_progress_items[@]} + ${#queued_items[@]} ))
+  printf '\n%s%d active item(s)%s\n' "${DIM}" "${active_count}" "${RESET}"
 }
 
 # cmd_stuck — find stuck opencode sessions
@@ -726,6 +800,12 @@ cmd_stuck() {
         STUCK_THRESHOLD_MIN="$2"
         shift 2
         ;;
+      --json)
+        JSON_OUTPUT=true
+        # Disable colors in JSON mode (§3.1.5)
+        RED='' GREEN='' YELLOW='' BLUE='' CYAN=''
+        BOLD='' DIM='' BOLD_RED='' RESET=''
+        shift ;;
       --help|-h)
         stuck_usage; return 0 ;;
       --)
@@ -737,8 +817,127 @@ cmd_stuck() {
     esac
   done
 
-  printf 'Stuck detection coming soon (Plan 02 implements this fully)\n'
-  printf 'Threshold: %s minutes\n' "${STUCK_THRESHOLD_MIN}"
+  # Step 1: Scan PID files and collect stuck processes
+  local stuck_pids=()
+  local stuck_names=()
+  local stuck_runtimes=()
+  local stuck_staleness=()
+
+  for pid_file in "${LOG_DIR}"/gsd-*-pid; do
+    [[ -f "${pid_file}" ]] || continue
+
+    # Extract session name from path: /tmp/gsd-SESSIONNAME-pid → SESSIONNAME
+    local session
+    session="${pid_file##*/gsd-}"
+    session="${session%-pid}"
+
+    local status
+    status=$(check_stuck "${session}")
+    # check_stuck() sets globals STUCK_RUNTIME and STUCK_LOG_STALENESS
+
+    if [[ "${status}" == "stuck" ]]; then
+      local pid
+      pid=$(< "${pid_file}")
+      stuck_pids+=("${pid}")
+      stuck_names+=("${session}")
+      stuck_runtimes+=("${STUCK_RUNTIME}")
+      stuck_staleness+=("${STUCK_LOG_STALENESS}")
+    fi
+    # not_running/not_found: check_stuck() already cleaned up stale PID files (§2.3.8, §5.9)
+  done
+
+  # Step 2: JSON output mode (§2.3 + §3.5)
+  if [[ "${JSON_OUTPUT:-false}" == "true" ]]; then
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    local stuck_json="[]"
+    if [[ ${#stuck_pids[@]} -gt 0 ]]; then
+      local i
+      stuck_json="["
+      for (( i=0; i<${#stuck_pids[@]}; i++ )); do
+        local item_json
+        item_json=$(jq -n \
+          --arg pid "${stuck_pids[${i}]}" \
+          --arg session "${stuck_names[${i}]}" \
+          --argjson runtime "${stuck_runtimes[${i}]}" \
+          --argjson log_staleness "${stuck_staleness[${i}]}" \
+          '{pid: $pid, session: $session, runtime_seconds: $runtime, log_staleness_seconds: $log_staleness}')
+        if [[ "${i}" -gt 0 ]]; then
+          stuck_json+=","
+        fi
+        stuck_json+="${item_json}"
+      done
+      stuck_json+="]"
+    fi
+    jq -n \
+      --arg timestamp "${timestamp}" \
+      --argjson threshold_minutes "${STUCK_THRESHOLD_MIN}" \
+      --argjson stuck "${stuck_json}" \
+      '{timestamp: $timestamp, threshold_minutes: $threshold_minutes, stuck: $stuck}'
+    return 0
+  fi
+
+  # Step 3: No stuck processes case (§2.3.9)
+  if [[ "${#stuck_pids[@]}" -eq 0 ]]; then
+    printf '%sNo stuck processes detected.%s\n' "${GREEN}" "${RESET}"
+    printf '%s(threshold: %d minutes)%s\n' "${DIM}" "${STUCK_THRESHOLD_MIN}" "${RESET}"
+    return 0
+  fi
+
+  # Step 4: Display stuck processes table
+  print_header "Stuck Processes (threshold: ${STUCK_THRESHOLD_MIN}m)"
+  print_table_header "%-8s %-25s %-12s %-15s" "PID" "SESSION" "RUNTIME" "LOG IDLE"
+
+  local i
+  for (( i=0; i<${#stuck_pids[@]}; i++ )); do
+    local short_session
+    short_session=$(truncate_str "${stuck_names[${i}]}" 25)
+    local runtime_fmt
+    runtime_fmt=$(format_duration "${stuck_runtimes[${i}]}")
+    local staleness_fmt
+    staleness_fmt=$(format_duration "${stuck_staleness[${i}]}")
+    printf '%s%-8s %-25s %-12s %-15s%s\n' \
+      "${BOLD_RED}" \
+      "${stuck_pids[${i}]}" \
+      "${short_session}" \
+      "${runtime_fmt}" \
+      "${staleness_fmt}" \
+      "${RESET}"
+  done
+  printf '\n'
+
+  # Step 5: Kill workflow (§2.3.5, §2.3.6, §2.3.7, §5.8)
+  if [[ "${kill_stuck}" == "true" ]]; then
+    # Confirmation prompt (skip if force=true)
+    if [[ "${force}" == "false" ]]; then
+      # Only prompt if stdin is a TTY (Pitfall #3 — don't hang in non-interactive)
+      if [[ ! -t 0 ]]; then
+        die "Cannot prompt for confirmation in non-interactive mode. Use --force to skip."
+      fi
+      printf '%sWill send SIGTERM to %d stuck process(es) listed above.%s\n' "${BOLD_RED}" "${#stuck_pids[@]}" "${RESET}"
+      local confirm
+      read -r -p "Kill these processes? [y/N]: " confirm
+      if [[ "${confirm}" != "y" && "${confirm}" != "Y" ]]; then
+        printf 'Aborted.\n'
+        return 0
+      fi
+    fi
+
+    printf '\n'
+    for (( i=0; i<${#stuck_pids[@]}; i++ )); do
+      local pid="${stuck_pids[${i}]}"
+      local session="${stuck_names[${i}]}"
+      # Re-verify alive before kill (§2.3.7) — process may have exited since we scanned
+      if kill -0 "${pid}" 2>/dev/null; then
+        kill "${pid}"  # SIGTERM only (§5.8) — never SIGKILL automatically
+        printf '%sKilled PID %s (session: %s)%s\n' "${GREEN}" "${pid}" "${session}" "${RESET}"
+        rm -f "${LOG_DIR}/gsd-${session}-pid"  # Clean up PID file after successful kill
+      else
+        printf '%sPID %s (session: %s) already exited%s\n' "${DIM}" "${pid}" "${session}" "${RESET}"
+        rm -f "${LOG_DIR}/gsd-${session}-pid"  # Clean up stale PID file
+      fi
+    done
+  fi
 }
 
 # cmd_log — show a readable session transcript
