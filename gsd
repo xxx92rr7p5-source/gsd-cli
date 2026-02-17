@@ -278,7 +278,8 @@ check_stuck() {
   fi
 }
 
-# get_queue_items — parse QUEUE.md and output pipe-delimited items: status|name|description
+# get_queue_items — parse QUEUE.md and output tab-delimited items: status\tname\tdescription
+# Uses tab as delimiter to avoid conflicts with | characters in QUEUE.md content
 get_queue_items() {
   if [[ ! -f "${QUEUE_FILE}" ]]; then
     debug "Queue file not found: ${QUEUE_FILE}"
@@ -289,22 +290,39 @@ get_queue_items() {
   local line
 
   while IFS= read -r line; do
-    # Detect section headers: ## In Progress, ## Queued, ## Done, ## Failed
+    # Skip comment lines (starting with #)
+    [[ "${line}" =~ ^# ]] && continue
+
+    # Detect section headers: ## In Progress, ## Queued, ## Done, ## Failed, ## Current Queue, etc.
     if [[ "${line}" =~ ^##[[:space:]]+(.+)$ ]]; then
       current_section="${BASH_REMATCH[1]}"
       continue
     fi
 
     # Parse task lines: - [ ] description or - [x] description
-    if [[ "${line}" =~ ^-[[:space:]]+\[([[:space:]xX])\][[:space:]]+(.+)$ ]]; then
+    # Also handles ~, !, S checkbox variants
+    if [[ "${line}" =~ ^-[[:space:]]+\[([[:space:]xX~!S])\][[:space:]]+(.+)$ ]]; then
       local checkbox="${BASH_REMATCH[1]}"
       local description="${BASH_REMATCH[2]}"
 
       # Determine status from section header (not checkbox)
       local status
       case "${current_section}" in
-        "In Progress"|"in progress"|"IN PROGRESS")
-          status="in_progress"
+        "In Progress"|"in progress"|"IN PROGRESS"|"Current Queue"|"current queue")
+          # Check checkbox for in-progress vs queued in generic sections
+          if [[ "${checkbox}" == "~" ]]; then
+            status="in_progress"
+          elif [[ "${checkbox}" == " " ]]; then
+            status="queued"
+          elif [[ "${checkbox}" == "!" ]]; then
+            status="failed"
+          elif [[ "${checkbox}" == "S" ]]; then
+            status="done"
+          elif [[ "${checkbox}" =~ [xX] ]]; then
+            status="done"
+          else
+            status="queued"
+          fi
           ;;
         "Queued"|"queued"|"QUEUED"|"To Do"|"TODO")
           status="queued"
@@ -317,17 +335,32 @@ get_queue_items() {
           ;;
         *)
           # Fall back to checkbox state if no recognizable section
-          if [[ "${checkbox}" == " " ]]; then
-            status="queued"
-          else
-            status="done"
-          fi
+          case "${checkbox}" in
+            " ") status="queued" ;;
+            "~") status="in_progress" ;;
+            "!") status="failed" ;;
+            [xXS]) status="done" ;;
+            *) status="queued" ;;
+          esac
           ;;
       esac
 
-      # Extract name:description if present, else use full description as name
+      # Extract name from description.
+      # Supports two formats:
+      #   1. "name: description" (from requirements spec)
+      #   2. "name | file | phases" (actual QUEUE.md format)
       local name desc
-      if [[ "${description}" =~ ^([^:]+):[[:space:]]*(.+)$ ]]; then
+      if [[ "${description}" =~ ^([^:|]+)\|(.*)$ ]]; then
+        # Pipe-delimited format: extract first field as name, trim whitespace
+        name="${BASH_REMATCH[1]}"
+        desc="${BASH_REMATCH[2]}"
+        # Trim leading/trailing whitespace from name
+        name="${name#"${name%%[![:space:]]*}"}"
+        name="${name%"${name##*[![:space:]]}"}"
+        desc="${desc#"${desc%%[![:space:]]*}"}"
+        desc="${desc%"${desc##*[![:space:]]}"}"
+      elif [[ "${description}" =~ ^([^:]+):[[:space:]]*(.+)$ ]]; then
+        # Colon-delimited format
         name="${BASH_REMATCH[1]}"
         desc="${BASH_REMATCH[2]}"
       else
@@ -335,7 +368,8 @@ get_queue_items() {
         desc=""
       fi
 
-      printf '%s|%s|%s\n' "${status}" "${name}" "${desc}"
+      # Output as tab-delimited (tab is safe since markdown doesn't use tabs in content)
+      printf '%s\t%s\t%s\n' "${status}" "${name}" "${desc}"
     fi
     # Silently skip malformed lines (§2.2.7)
   done < "${QUEUE_FILE}"
@@ -437,14 +471,17 @@ cmd_status() {
   local completed_count
   completed_count=$(printf '%s' "${completed_json}" | jq 'length' 2>/dev/null) || completed_count=0
 
-  # Parse queue items
+  # Parse queue items (tab-delimited: status\tname\tdescription)
   local queue_items=()
   local queue_count=0
   if [[ -f "${QUEUE_FILE}" ]]; then
-    while IFS= read -r item; do
-      queue_items+=("${item}")
-      (( queue_count++ )) || true
-    done < <(get_queue_items | grep -E '^(queued|in_progress)\|' 2>/dev/null || true)
+    while IFS=$'\t' read -r q_status q_name q_desc; do
+      # Only include active items (queued or in_progress)
+      if [[ "${q_status}" == "queued" || "${q_status}" == "in_progress" ]]; then
+        queue_items+=("${q_status}	${q_name}	${q_desc}")
+        (( queue_count++ )) || true
+      fi
+    done < <(get_queue_items 2>/dev/null || true)
   fi
 
   # Check for stuck sessions
@@ -455,10 +492,14 @@ cmd_status() {
     local timestamp
     timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+    # Build queue JSON safely by converting tab-delimited output to JSON
     local all_queue_items
     all_queue_items=$(get_queue_items 2>/dev/null | \
-      awk -F'|' '{printf "{\"status\":\"%s\",\"name\":\"%s\",\"description\":\"%s\"}\n", $1, $2, $3}' | \
+      jq -Rr 'split("\t") | if length >= 2 then
+        {status: .[0], name: .[1], description: (.[2] // "")}
+      else empty end' 2>/dev/null | \
       jq -sc '.' 2>/dev/null) || all_queue_items="[]"
+    [[ "${all_queue_items}" == "null" || -z "${all_queue_items}" ]] && all_queue_items="[]"
 
     jq -n \
       --arg timestamp "${timestamp}" \
@@ -531,7 +572,7 @@ cmd_status() {
       print_table_header "%-12s %-25s %s" "STATUS" "NAME" "DESCRIPTION"
       for item in "${queue_items[@]}"; do
         local s n d
-        IFS='|' read -r s n d <<< "${item}"
+        IFS=$'\t' read -r s n d <<< "${item}"
         local color
         case "${s}" in
           in_progress) color="${GREEN}" ;;
@@ -586,7 +627,7 @@ cmd_status() {
           break
         fi
         local s n d
-        IFS='|' read -r s n d <<< "${item}"
+        IFS=$'\t' read -r s n d <<< "${item}"
         local icon
         case "${s}" in
           in_progress) icon="⟳" ;;
