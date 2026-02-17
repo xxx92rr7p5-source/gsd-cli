@@ -1,0 +1,12 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "read": {
+      "/home/luca/dev/punchlab/baby-predictor/.opencode/get-shit-done/*": "allow",
+      "/home/luca/dev/punchlab/baby-predictor/.env": "allow"
+    },
+    "external_directory": {
+      "/home/luca/dev/punchlab/baby-predictor/.opencode/get-shit-done/*": "allow"
+    }
+  }
+}
