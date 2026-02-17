@@ -6,7 +6,7 @@ readonly VERSION="0.1.0"
 readonly QUEUE_FILE="${GSD_QUEUE_FILE:-$HOME/dev/punchlab/QUEUE.md}"
 readonly LOG_DIR="${GSD_LOG_DIR:-/tmp}"
 # NOTE: STUCK_THRESHOLD_MIN is NOT readonly — the --threshold flag can override it at runtime
-STUCK_THRESHOLD_MIN="${GSD_STUCK_THRESHOLD:-30}"
+STUCK_THRESHOLD_MIN="${GSD_STUCK_THRESHOLD:-90}"
 readonly PROG_NAME="gsd"
 
 # ── Color Variables ────────────────────────────────────────────────────────────
@@ -284,8 +284,18 @@ check_stuck() {
   threshold_seconds=$(( STUCK_THRESHOLD_MIN * 60 ))
   local stale_threshold=300  # 5 minutes in seconds
 
+  # Check CPU usage — if process is actively working (>0.5% CPU), it's not stuck
+  local cpu_usage
+  cpu_usage=$(ps -o %cpu= -p "${pid}" 2>/dev/null) || cpu_usage="0"
+  cpu_usage="${cpu_usage// /}"
+  # Compare as integer (multiply by 10 to handle decimals)
+  local cpu_int
+  cpu_int=$(printf '%.0f' "$(echo "${cpu_usage} * 10" | bc 2>/dev/null)" 2>/dev/null) || cpu_int=0
+
   if [[ "${STUCK_RUNTIME}" -gt "${threshold_seconds}" ]] && \
-     [[ "${STUCK_LOG_STALENESS}" -gt "${stale_threshold}" ]]; then
+     [[ "${STUCK_LOG_STALENESS}" -gt "${stale_threshold}" ]] && \
+     [[ "${cpu_int}" -lt 5 ]]; then
+    # Only stuck if: over threshold + stale log + near-zero CPU (<0.5%)
     printf 'stuck'
   else
     printf 'running'
@@ -421,9 +431,9 @@ queue_usage() {
 
 stuck_usage() {
   printf '%sUsage:%s %s stuck [options]\n\n' "${BOLD}" "${RESET}" "${PROG_NAME}"
-  printf 'Find hung opencode processes (running longer than threshold with stale logs).\n\n'
+  printf 'Find truly stuck processes (long runtime + stale logs + zero CPU activity).\n\n'
   printf '%sOptions:%s\n' "${BOLD}" "${RESET}"
-  printf '  %-26s %s\n' '-t, --threshold <minutes>' "Override stuck threshold (default: ${STUCK_THRESHOLD_MIN})"
+  printf '  %-26s %s\n' '-t, --threshold <minutes>' "Override threshold in minutes (default: 90)"
   printf '  %-26s %s\n' '-k, --kill'                'Kill all detected stuck processes (with confirmation)'
   printf '  %-26s %s\n' '-f, --force'               'Skip confirmation when killing'
   printf '  %-26s %s\n' '--json'                    'Output as JSON'
@@ -906,7 +916,7 @@ cmd_stuck() {
   # Step 3: No stuck processes case (§2.3.9)
   if [[ "${#stuck_pids[@]}" -eq 0 ]]; then
     printf '%sNo stuck processes detected.%s\n' "${GREEN}" "${RESET}"
-    printf '%s(threshold: %d minutes)%s\n' "${DIM}" "${STUCK_THRESHOLD_MIN}" "${RESET}"
+    printf '%s(threshold: %dm, checks CPU activity)%s\n' "${DIM}" "${STUCK_THRESHOLD_MIN}" "${RESET}"
     return 0
   fi
 
