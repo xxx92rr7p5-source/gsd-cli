@@ -1,0 +1,839 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ── Constants ──────────────────────────────────────────────────────────────────
+readonly VERSION="0.1.0"
+readonly QUEUE_FILE="${GSD_QUEUE_FILE:-$HOME/dev/punchlab/QUEUE.md}"
+readonly LOG_DIR="${GSD_LOG_DIR:-/tmp}"
+# NOTE: STUCK_THRESHOLD_MIN is NOT readonly — the --threshold flag can override it at runtime
+STUCK_THRESHOLD_MIN="${GSD_STUCK_THRESHOLD:-30}"
+readonly PROG_NAME="gsd"
+
+# ── Color Variables ────────────────────────────────────────────────────────────
+# Not readonly — set by setup_colors() based on TTY detection
+RED='' GREEN='' YELLOW='' BLUE='' CYAN=''
+BOLD='' DIM='' BOLD_RED='' RESET=''
+
+# ── Utility Functions ──────────────────────────────────────────────────────────
+
+# setup_colors — enable ANSI colors if stdout is a TTY and NO_COLOR is not set
+setup_colors() {
+  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]] && [[ "${TERM:-}" != "dumb" ]]; then
+    RED=$'\033[0;31m'
+    GREEN=$'\033[0;32m'
+    YELLOW=$'\033[0;33m'
+    BLUE=$'\033[0;34m'
+    CYAN=$'\033[0;36m'
+    BOLD=$'\033[1m'
+    DIM=$'\033[2m'
+    BOLD_RED=$'\033[1;31m'
+    RESET=$'\033[0m'
+  else
+    RED='' GREEN='' YELLOW='' BLUE='' CYAN=''
+    BOLD='' DIM='' BOLD_RED='' RESET=''
+  fi
+}
+
+# err — print an error message to stderr (styled red)
+err() {
+  printf '%sError: %s%s\n' "${RED}" "$*" "${RESET}" >&2
+}
+
+# warn — print a warning message to stderr (styled yellow)
+warn() {
+  printf '%sWarning: %s%s\n' "${YELLOW}" "$*" "${RESET}" >&2
+}
+
+# debug — print a debug message to stderr ONLY if VERBOSE=true (styled dim)
+debug() {
+  if [[ "${VERBOSE:-false}" == "true" ]]; then
+    printf '%s[debug] %s%s\n' "${DIM}" "$*" "${RESET}" >&2
+  fi
+}
+
+# die — print error and exit with code 1 (runtime error)
+die() {
+  err "$@"
+  exit 1
+}
+
+# die_usage — print error + help hint and exit with code 2 (usage error)
+die_usage() {
+  err "$@"
+  printf "Run '%s --help' for usage.\n" "${PROG_NAME}" >&2
+  exit 2
+}
+
+# cleanup — remove temp file if set; registered via trap
+cleanup() {
+  [[ -n "${TMPFILE:-}" ]] && rm -f "${TMPFILE}" || true
+}
+trap cleanup EXIT
+
+# check_deps — verify jq and opencode are installed; die with install instructions if not
+check_deps() {
+  local missing=()
+
+  if ! command -v jq &>/dev/null; then
+    missing+=("jq")
+  fi
+
+  if ! command -v opencode &>/dev/null; then
+    missing+=("opencode")
+  fi
+
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    for dep in "${missing[@]}"; do
+      case "${dep}" in
+        jq)
+          err "Missing required dependency: jq"
+          printf '  Install jq:\n' >&2
+          printf '    macOS:   brew install jq\n' >&2
+          printf '    Ubuntu:  sudo apt-get install jq\n' >&2
+          printf '    Fedora:  sudo dnf install jq\n' >&2
+          printf '    Other:   https://jqlang.github.io/jq/download/\n' >&2
+          ;;
+        opencode)
+          err "Missing required dependency: opencode"
+          printf '  Install opencode:\n' >&2
+          printf '    npm install -g opencode-ai\n' >&2
+          printf '    Or visit: https://opencode.ai\n' >&2
+          ;;
+      esac
+    done
+    exit 1
+  fi
+}
+
+# format_duration — format seconds into human-readable string: Xh Ym / Xm Ys / Xs
+format_duration() {
+  local seconds="$1"
+
+  # Guard against non-numeric input
+  if [[ ! "${seconds}" =~ ^[0-9]+$ ]]; then
+    printf 'unknown'
+    return
+  fi
+
+  local hours minutes
+  hours=$(( seconds / 3600 ))
+  minutes=$(( (seconds % 3600) / 60 ))
+
+  if (( hours > 0 )); then
+    printf '%dh %dm' "${hours}" "${minutes}"
+  elif (( minutes > 0 )); then
+    printf '%dm %ds' "${minutes}" $(( seconds % 60 ))
+  else
+    printf '%ds' "${seconds}"
+  fi
+}
+
+# ── Formatting Functions ───────────────────────────────────────────────────────
+
+# print_header — print a bold+blue section header with a dim separator line
+print_header() {
+  printf '%s%s%s\n' "${BOLD}${BLUE}" "$1" "${RESET}"
+  printf '%s%s%s\n' "${DIM}" "$(printf '%.0s─' {1..60})" "${RESET}"
+}
+
+# print_table_header — print a bold table header row and dim separator
+# Usage: print_table_header "%-20s %-8s %-10s" "SESSION" "STATUS" "DURATION"
+print_table_header() {
+  local fmt="$1"
+  shift
+  # shellcheck disable=SC2059
+  printf "${BOLD}${fmt}${RESET}\n" "$@"
+  printf '%s%s%s\n' "${DIM}" "$(printf '%.0s─' {1..60})" "${RESET}"
+}
+
+# truncate_str — truncate a string to max_width, appending … if truncated
+truncate_str() {
+  local str="$1"
+  local max_width="$2"
+
+  if [[ ${#str} -gt ${max_width} ]]; then
+    printf '%s…' "${str:0:$(( max_width - 1 ))}"
+  else
+    printf '%s' "${str}"
+  fi
+}
+
+# ── Data Functions ─────────────────────────────────────────────────────────────
+
+# Global cache for session data (populated by get_sessions)
+SESSION_DATA="[]"
+
+# get_sessions — call opencode session list once and cache result in SESSION_DATA
+get_sessions() {
+  local json
+  json=$(opencode session list --json 2>/dev/null) || json="[]"
+
+  # Validate the output is a valid JSON array
+  if printf '%s' "${json}" | jq -e 'type == "array"' &>/dev/null; then
+    SESSION_DATA="${json}"
+  else
+    debug "opencode session list returned invalid JSON; using empty session list"
+    SESSION_DATA="[]"
+  fi
+}
+
+# get_running_sessions — filter SESSION_DATA for running/active sessions
+# Outputs a JSON array of running sessions
+get_running_sessions() {
+  # Try filtering by status field; fall back to all sessions if no status field exists
+  local running
+  running=$(printf '%s' "${SESSION_DATA}" | \
+    jq -c '[.[] | select(.status == "running" or .status == "active")]' 2>/dev/null) || running="[]"
+
+  # If all statuses are null/missing, return all sessions as potentially running
+  local count
+  count=$(printf '%s' "${running}" | jq 'length' 2>/dev/null) || count=0
+  local total
+  total=$(printf '%s' "${SESSION_DATA}" | jq 'length' 2>/dev/null) || total=0
+
+  if [[ "${count}" -eq 0 ]] && [[ "${total}" -gt 0 ]]; then
+    # Check if sessions have a status field at all
+    local has_status
+    has_status=$(printf '%s' "${SESSION_DATA}" | jq '[.[] | has("status")] | any' 2>/dev/null) || has_status="false"
+    if [[ "${has_status}" == "false" ]]; then
+      # No status field — return all sessions
+      printf '%s' "${SESSION_DATA}"
+      return
+    fi
+  fi
+
+  printf '%s' "${running}"
+}
+
+# get_completed_sessions — extract completed/finished sessions, last 5, newest first
+get_completed_sessions() {
+  local completed
+  completed=$(printf '%s' "${SESSION_DATA}" | \
+    jq -c '[.[] | select(.status == "completed" or .status == "done" or .status == "finished" or .status == "failed")]
+           | sort_by(.updated_at // .created_at // "")
+           | reverse
+           | .[0:5]' 2>/dev/null) || completed="[]"
+  printf '%s' "${completed}"
+}
+
+# check_stuck — check if a session is stuck by examining its PID file and log file
+# Arguments: $1 = session name/id
+# Outputs: status string to stdout (running, stuck, not_found, not_running)
+# Sets global STUCK_RUNTIME and STUCK_LOG_STALENESS for caller inspection
+STUCK_RUNTIME=0
+STUCK_LOG_STALENESS=0
+
+check_stuck() {
+  local session="$1"
+  local pid_file="${LOG_DIR}/gsd-${session}-pid"
+  local log_file="${LOG_DIR}/gsd-${session}.log"
+
+  STUCK_RUNTIME=0
+  STUCK_LOG_STALENESS=0
+
+  if [[ ! -f "${pid_file}" ]]; then
+    printf 'not_found'
+    return
+  fi
+
+  local pid
+  pid=$(< "${pid_file}")
+
+  # Verify the PID is still alive
+  if ! kill -0 "${pid}" 2>/dev/null; then
+    # Stale PID file — remove it silently
+    rm -f "${pid_file}"
+    printf 'not_running'
+    return
+  fi
+
+  # Get runtime in seconds
+  local runtime
+  runtime=$(ps -o etimes= -p "${pid}" 2>/dev/null) || runtime=0
+  runtime="${runtime// /}"  # strip whitespace
+  STUCK_RUNTIME="${runtime:-0}"
+
+  # Get log staleness
+  local now
+  now=$(date +%s)
+
+  if [[ -f "${log_file}" ]]; then
+    local log_mtime
+    log_mtime=$(stat -c %Y "${log_file}" 2>/dev/null) || log_mtime="${now}"
+    STUCK_LOG_STALENESS=$(( now - log_mtime ))
+  else
+    # No log file — treat as potentially stuck if runtime > threshold
+    STUCK_LOG_STALENESS=9999
+  fi
+
+  local threshold_seconds
+  threshold_seconds=$(( STUCK_THRESHOLD_MIN * 60 ))
+  local stale_threshold=300  # 5 minutes in seconds
+
+  if [[ "${STUCK_RUNTIME}" -gt "${threshold_seconds}" ]] && \
+     [[ "${STUCK_LOG_STALENESS}" -gt "${stale_threshold}" ]]; then
+    printf 'stuck'
+  else
+    printf 'running'
+  fi
+}
+
+# get_queue_items — parse QUEUE.md and output pipe-delimited items: status|name|description
+get_queue_items() {
+  if [[ ! -f "${QUEUE_FILE}" ]]; then
+    debug "Queue file not found: ${QUEUE_FILE}"
+    return 0
+  fi
+
+  local current_section=""
+  local line
+
+  while IFS= read -r line; do
+    # Detect section headers: ## In Progress, ## Queued, ## Done, ## Failed
+    if [[ "${line}" =~ ^##[[:space:]]+(.+)$ ]]; then
+      current_section="${BASH_REMATCH[1]}"
+      continue
+    fi
+
+    # Parse task lines: - [ ] description or - [x] description
+    if [[ "${line}" =~ ^-[[:space:]]+\[([[:space:]xX])\][[:space:]]+(.+)$ ]]; then
+      local checkbox="${BASH_REMATCH[1]}"
+      local description="${BASH_REMATCH[2]}"
+
+      # Determine status from section header (not checkbox)
+      local status
+      case "${current_section}" in
+        "In Progress"|"in progress"|"IN PROGRESS")
+          status="in_progress"
+          ;;
+        "Queued"|"queued"|"QUEUED"|"To Do"|"TODO")
+          status="queued"
+          ;;
+        "Done"|"done"|"DONE"|"Completed"|"completed")
+          status="done"
+          ;;
+        "Failed"|"failed"|"FAILED")
+          status="failed"
+          ;;
+        *)
+          # Fall back to checkbox state if no recognizable section
+          if [[ "${checkbox}" == " " ]]; then
+            status="queued"
+          else
+            status="done"
+          fi
+          ;;
+      esac
+
+      # Extract name:description if present, else use full description as name
+      local name desc
+      if [[ "${description}" =~ ^([^:]+):[[:space:]]*(.+)$ ]]; then
+        name="${BASH_REMATCH[1]}"
+        desc="${BASH_REMATCH[2]}"
+      else
+        name="${description}"
+        desc=""
+      fi
+
+      printf '%s|%s|%s\n' "${status}" "${name}" "${desc}"
+    fi
+    # Silently skip malformed lines (§2.2.7)
+  done < "${QUEUE_FILE}"
+}
+
+# ── Subcommand Help Functions ──────────────────────────────────────────────────
+
+status_usage() {
+  printf '%sUsage:%s %s status [options]\n\n' "${BOLD}" "${RESET}" "${PROG_NAME}"
+  printf 'Show a dashboard of running sessions, stuck indicators, queued items,\n'
+  printf 'and last 5 completed sessions.\n\n'
+  printf '%sOptions:%s\n' "${BOLD}" "${RESET}"
+  printf '  %-20s %s\n' '-v, --verbose' 'Show full table with PID, paths, timestamps'
+  printf '  %-20s %s\n' '--json'        'Output as JSON (implies --no-color)'
+  printf '  %-20s %s\n' '-h, --help'    'Show this help message'
+  printf '\n%sExamples:%s\n' "${BOLD}" "${RESET}"
+  printf '  %s status\n' "${PROG_NAME}"
+  printf '  %s status --verbose\n' "${PROG_NAME}"
+  printf '  %s status --json | jq .summary\n' "${PROG_NAME}"
+}
+
+queue_usage() {
+  printf '%sUsage:%s %s queue [options]\n\n' "${BOLD}" "${RESET}" "${PROG_NAME}"
+  printf 'Pretty-print the QUEUE.md pipeline task list.\n\n'
+  printf '%sOptions:%s\n' "${BOLD}" "${RESET}"
+  printf '  %-20s %s\n' '-h, --help'    'Show this help message'
+  printf '\n%sEnvironment:%s\n' "${BOLD}" "${RESET}"
+  printf '  %-20s %s\n' 'GSD_QUEUE_FILE' "Path to QUEUE.md (default: ~/dev/punchlab/QUEUE.md)"
+  printf '\n%sExamples:%s\n' "${BOLD}" "${RESET}"
+  printf '  %s queue\n' "${PROG_NAME}"
+  printf '  %s q\n' "${PROG_NAME}"
+}
+
+stuck_usage() {
+  printf '%sUsage:%s %s stuck [options]\n\n' "${BOLD}" "${RESET}" "${PROG_NAME}"
+  printf 'Find hung opencode processes (running longer than threshold with stale logs).\n\n'
+  printf '%sOptions:%s\n' "${BOLD}" "${RESET}"
+  printf '  %-26s %s\n' '-t, --threshold <minutes>' "Override stuck threshold (default: ${STUCK_THRESHOLD_MIN})"
+  printf '  %-26s %s\n' '-k, --kill'                'Kill all detected stuck processes (with confirmation)'
+  printf '  %-26s %s\n' '-f, --force'               'Skip confirmation when killing'
+  printf '  %-26s %s\n' '-h, --help'                'Show this help message'
+  printf '\n%sExamples:%s\n' "${BOLD}" "${RESET}"
+  printf '  %s stuck\n' "${PROG_NAME}"
+  printf '  %s stuck --threshold 60\n' "${PROG_NAME}"
+  printf '  %s stuck --kill --force\n' "${PROG_NAME}"
+}
+
+log_usage() {
+  printf '%sUsage:%s %s log <session> [options]\n\n' "${BOLD}" "${RESET}" "${PROG_NAME}"
+  printf 'Show a readable transcript of an opencode session.\n\n'
+  printf '%sArguments:%s\n' "${BOLD}" "${RESET}"
+  printf '  %-20s %s\n' '<session>' 'Session name or ID to view'
+  printf '\n%sOptions:%s\n' "${BOLD}" "${RESET}"
+  printf '  %-20s %s\n' '-h, --help' 'Show this help message'
+  printf '\n%sExamples:%s\n' "${BOLD}" "${RESET}"
+  printf '  %s log my-session\n' "${PROG_NAME}"
+  printf '  %s log abc123\n' "${PROG_NAME}"
+}
+
+tail_usage() {
+  printf '%sUsage:%s %s tail <session> [options]\n\n' "${BOLD}" "${RESET}" "${PROG_NAME}"
+  printf 'Live-follow a running opencode session output (like tail -f).\n\n'
+  printf '%sArguments:%s\n' "${BOLD}" "${RESET}"
+  printf '  %-20s %s\n' '<session>' 'Session name or ID to follow'
+  printf '\n%sOptions:%s\n' "${BOLD}" "${RESET}"
+  printf '  %-20s %s\n' '-h, --help' 'Show this help message'
+  printf '\n%sExamples:%s\n' "${BOLD}" "${RESET}"
+  printf '  %s tail my-session\n' "${PROG_NAME}"
+  printf '  Ctrl-C to stop following\n'
+}
+
+# ── Subcommand Functions ───────────────────────────────────────────────────────
+
+# cmd_status — show the GSD pipeline status dashboard
+cmd_status() {
+  local verbose="${VERBOSE:-false}"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --verbose|-v) verbose=true; shift ;;
+      --help|-h)    status_usage; return 0 ;;
+      --)           shift; break ;;
+      -*)           die_usage "Unknown option for 'status': $1" ;;
+      *)            break ;;
+    esac
+  done
+
+  # Gather data
+  get_sessions
+  local running_json
+  running_json=$(get_running_sessions)
+  local completed_json
+  completed_json=$(get_completed_sessions)
+
+  # Parse running sessions into arrays
+  local running_count
+  running_count=$(printf '%s' "${running_json}" | jq 'length' 2>/dev/null) || running_count=0
+
+  local completed_count
+  completed_count=$(printf '%s' "${completed_json}" | jq 'length' 2>/dev/null) || completed_count=0
+
+  # Parse queue items
+  local queue_items=()
+  local queue_count=0
+  if [[ -f "${QUEUE_FILE}" ]]; then
+    while IFS= read -r item; do
+      queue_items+=("${item}")
+      (( queue_count++ )) || true
+    done < <(get_queue_items | grep -E '^(queued|in_progress)\|' 2>/dev/null || true)
+  fi
+
+  # Check for stuck sessions
+  local stuck_count=0
+
+  # JSON output mode
+  if [[ "${JSON_OUTPUT:-false}" == "true" ]]; then
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    local all_queue_items
+    all_queue_items=$(get_queue_items 2>/dev/null | \
+      awk -F'|' '{printf "{\"status\":\"%s\",\"name\":\"%s\",\"description\":\"%s\"}\n", $1, $2, $3}' | \
+      jq -sc '.' 2>/dev/null) || all_queue_items="[]"
+
+    jq -n \
+      --arg timestamp "${timestamp}" \
+      --argjson running_count "${running_count}" \
+      --argjson stuck_count "${stuck_count}" \
+      --argjson queue_count "${queue_count}" \
+      --argjson sessions_running "${running_json}" \
+      --argjson sessions_completed "${completed_json}" \
+      --argjson queue "${all_queue_items}" \
+      '{
+        timestamp: $timestamp,
+        summary: {
+          running: $running_count,
+          stuck: $stuck_count,
+          queued: $queue_count
+        },
+        sessions: {
+          running: $sessions_running,
+          stuck: []
+        },
+        queue: $queue,
+        completed: $sessions_completed
+      }'
+    return 0
+  fi
+
+  # Human-readable output
+  printf '%s%s GSD Status%s\n' "${BOLD}" "📊" "${RESET}"
+  printf '%s%s%s\n\n' "${DIM}" "$(printf '%.0s─' {1..60})" "${RESET}"
+
+  # Summary counts
+  local running_color="${GREEN}"
+  local stuck_color="${RED}"
+  local queue_color="${YELLOW}"
+
+  printf '%s%d running%s  %s%d stuck%s  %s%d queued%s\n\n' \
+    "${running_color}" "${running_count}" "${RESET}" \
+    "${stuck_color}" "${stuck_count}" "${RESET}" \
+    "${queue_color}" "${queue_count}" "${RESET}"
+
+  # Empty state
+  if [[ "${running_count}" -eq 0 ]] && [[ "${queue_count}" -eq 0 ]] && [[ "${completed_count}" -eq 0 ]]; then
+    printf '%sNo active sessions. Queue is empty. All clear!%s\n' "${DIM}" "${RESET}"
+    return 0
+  fi
+
+  if [[ "${verbose}" == "true" ]]; then
+    # Verbose: full tables
+    if [[ "${running_count}" -gt 0 ]]; then
+      print_header "Running Sessions"
+      print_table_header "%-20s %-10s %-8s %-12s %-15s" \
+        "SESSION" "STATUS" "PID" "DURATION" "LOG ACTIVITY"
+      while IFS=$'\t' read -r sess status pid dur updated; do
+        local short_sess
+        short_sess=$(truncate_str "${sess}" 20)
+        printf '%-20s %-10s %-8s %-12s %-15s\n' \
+          "${short_sess}" "${status}" "${pid}" "${dur}" "${updated}"
+      done < <(printf '%s' "${running_json}" | jq -r '.[] | [
+        (.id // .name // "unknown"),
+        (.status // "running"),
+        (.pid // "N/A" | tostring),
+        (.duration // "N/A" | tostring),
+        (.updated_at // "N/A")
+      ] | @tsv' 2>/dev/null)
+      printf '\n'
+    fi
+
+    if [[ "${queue_count}" -gt 0 ]]; then
+      print_header "Queue"
+      print_table_header "%-12s %-25s %s" "STATUS" "NAME" "DESCRIPTION"
+      for item in "${queue_items[@]}"; do
+        local s n d
+        IFS='|' read -r s n d <<< "${item}"
+        local color
+        case "${s}" in
+          in_progress) color="${GREEN}" ;;
+          queued)      color="${YELLOW}" ;;
+          *) color="${RESET}" ;;
+        esac
+        local short_n
+        short_n=$(truncate_str "${n}" 25)
+        printf '%s%-12s %-25s %s%s\n' "${color}" "${s}" "${short_n}" "${d}" "${RESET}"
+      done
+      printf '\n'
+    fi
+
+    if [[ "${completed_count}" -gt 0 ]]; then
+      print_header "Completed (last 5)"
+      print_table_header "%-20s %-10s %s" "SESSION" "STATUS" "FINISHED"
+      while IFS=$'\t' read -r sess status finished; do
+        local short_sess color
+        short_sess=$(truncate_str "${sess}" 20)
+        case "${status}" in
+          done|completed|finished) color="${DIM}" ;;
+          failed) color="${RED}" ;;
+          *) color="${DIM}" ;;
+        esac
+        printf '%s%-20s %-10s %s%s\n' "${color}" "${short_sess}" "${status}" "${finished}" "${RESET}"
+      done < <(printf '%s' "${completed_json}" | jq -r '.[] | [
+        (.id // .name // "unknown"),
+        (.status // "done"),
+        (.updated_at // "N/A")
+      ] | @tsv' 2>/dev/null)
+      printf '\n'
+    fi
+
+  else
+    # Compact view
+    if [[ "${running_count}" -gt 0 ]]; then
+      print_header "Running"
+      while IFS= read -r sess; do
+        printf '  %s●%s %s\n' "${GREEN}" "${RESET}" "${sess}"
+      done < <(printf '%s' "${running_json}" | jq -r '.[] | (.id // .name // "unknown")' 2>/dev/null)
+      printf '\n'
+    else
+      printf '%sNo running sessions%s\n\n' "${DIM}" "${RESET}"
+    fi
+
+    if [[ "${queue_count}" -gt 0 ]]; then
+      print_header "Queued"
+      local shown=0
+      for item in "${queue_items[@]}"; do
+        if [[ "${shown}" -ge 3 ]]; then
+          printf '  %s... and %d more%s\n' "${DIM}" "$(( queue_count - shown ))" "${RESET}"
+          break
+        fi
+        local s n d
+        IFS='|' read -r s n d <<< "${item}"
+        local icon
+        case "${s}" in
+          in_progress) icon="⟳" ;;
+          *) icon="○" ;;
+        esac
+        printf '  %s %s\n' "${icon}" "${n}"
+        (( shown++ )) || true
+      done
+      printf '\n'
+    fi
+
+    if [[ "${completed_count}" -gt 0 ]]; then
+      print_header "Recently Completed"
+      while IFS= read -r line; do
+        printf '  %s✓%s %s\n' "${DIM}" "${RESET}" "${line}"
+      done < <(printf '%s' "${completed_json}" | jq -r '.[] | (.id // .name // "unknown") + " (" + (.status // "done") + ")"' 2>/dev/null)
+      printf '\n'
+    fi
+  fi
+}
+
+# cmd_queue — pretty-print QUEUE.md
+cmd_queue() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h) queue_usage; return 0 ;;
+      --)        shift; break ;;
+      -*)        die_usage "Unknown option for 'queue': $1" ;;
+      *)         break ;;
+    esac
+  done
+
+  printf '%sQueue: %s%s\n' "${BOLD}" "${QUEUE_FILE}" "${RESET}"
+  printf '%s%s%s\n\n' "${DIM}" "$(printf '%.0s─' {1..60})" "${RESET}"
+
+  if [[ ! -f "${QUEUE_FILE}" ]]; then
+    die "Queue file not found: ${QUEUE_FILE}"
+  fi
+
+  local current_section=""
+  local line
+
+  while IFS= read -r line; do
+    if [[ "${line}" =~ ^##[[:space:]]+(.+)$ ]]; then
+      current_section="${BASH_REMATCH[1]}"
+      printf '\n%s%s%s\n' "${BOLD}" "${current_section}" "${RESET}"
+      continue
+    fi
+
+    if [[ "${line}" =~ ^-[[:space:]]+\[([[:space:]xX])\][[:space:]]+(.+)$ ]]; then
+      local checkbox="${BASH_REMATCH[1]}"
+      local description="${BASH_REMATCH[2]}"
+      local color icon
+
+      case "${current_section}" in
+        "In Progress"|"in progress")
+          color="${GREEN}"; icon="⟳" ;;
+        "Queued"|"queued"|"To Do")
+          color="${YELLOW}"; icon="○" ;;
+        "Done"|"done"|"Completed")
+          color="${DIM}"; icon="✓" ;;
+        "Failed"|"failed")
+          color="${RED}"; icon="✗" ;;
+        *)
+          if [[ "${checkbox}" == " " ]]; then
+            color="${YELLOW}"; icon="○"
+          else
+            color="${DIM}"; icon="✓"
+          fi
+          ;;
+      esac
+
+      printf '  %s%s %s%s\n' "${color}" "${icon}" "${description}" "${RESET}"
+    fi
+  done < "${QUEUE_FILE}"
+}
+
+# cmd_stuck — find stuck opencode sessions
+cmd_stuck() {
+  local kill_stuck=false
+  local force=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --kill|-k)
+        kill_stuck=true; shift ;;
+      --force|-f)
+        force=true; shift ;;
+      --threshold|-t)
+        if [[ -z "${2:-}" ]]; then
+          die_usage "Option $1 requires a numeric argument"
+        fi
+        if [[ ! "${2}" =~ ^[0-9]+$ ]]; then
+          die_usage "Invalid threshold value '${2}': must be a positive integer"
+        fi
+        STUCK_THRESHOLD_MIN="$2"
+        shift 2
+        ;;
+      --help|-h)
+        stuck_usage; return 0 ;;
+      --)
+        shift; break ;;
+      -*)
+        die_usage "Unknown option for 'stuck': $1" ;;
+      *)
+        break ;;
+    esac
+  done
+
+  printf 'Stuck detection coming soon (Plan 02 implements this fully)\n'
+  printf 'Threshold: %s minutes\n' "${STUCK_THRESHOLD_MIN}"
+}
+
+# cmd_log — show a readable session transcript
+cmd_log() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h) log_usage; return 0 ;;
+      --) shift; break ;;
+      -*) die_usage "Unknown option for 'log': $1" ;;
+      *)  break ;;
+    esac
+  done
+
+  local session="${1:-}"
+  if [[ -z "${session}" ]]; then
+    die_usage "Missing required argument: <session>"
+  fi
+
+  printf 'Session log for: %s\n' "${session}"
+  printf 'Log viewer coming in a future plan\n'
+}
+
+# cmd_tail — live-follow a session's output
+cmd_tail() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h) tail_usage; return 0 ;;
+      --) shift; break ;;
+      -*) die_usage "Unknown option for 'tail': $1" ;;
+      *)  break ;;
+    esac
+  done
+
+  local session="${1:-}"
+  if [[ -z "${session}" ]]; then
+    die_usage "Missing required argument: <session>"
+  fi
+
+  printf 'Following session: %s\n' "${session}"
+  printf 'Live tail coming in a future plan\n'
+}
+
+# ── Usage / Help ───────────────────────────────────────────────────────────────
+
+usage() {
+  printf '%s%s%s — GSD Pipeline Monitor v%s\n\n' "${BOLD}" "${PROG_NAME}" "${RESET}" "${VERSION}"
+  printf '%sUsage:%s\n' "${BOLD}" "${RESET}"
+  printf '  %s [global-options] <command> [command-options]\n\n' "${PROG_NAME}"
+  printf '%sCommands:%s\n' "${BOLD}" "${RESET}"
+  printf '  %-20s %s\n' 'status'       'Show pipeline dashboard (running, stuck, queued, completed) [default]'
+  printf '  %-20s %s\n' 'queue, q'     'Pretty-print QUEUE.md pipeline task list'
+  printf '  %-20s %s\n' 'stuck'        'Find hung processes (optionally kill them)'
+  printf '  %-20s %s\n' 'log <session>' 'Show readable transcript of an opencode session'
+  printf '  %-20s %s\n' 'tail <session>' 'Live-follow a running session output'
+  printf '  %-20s %s\n' 'help'          'Show this help message'
+  printf '\n%sGlobal Options:%s\n' "${BOLD}" "${RESET}"
+  printf '  %-20s %s\n' '-v, --verbose'  'Show verbose output (full tables, debug messages)'
+  printf '  %-20s %s\n' '--json'         'Output as JSON (disables colors)'
+  printf '  %-20s %s\n' '-h, --help'     'Show this help message'
+  printf '  %-20s %s\n' '--version'      'Print version string and exit'
+  printf '\n%sEnvironment Variables:%s\n' "${BOLD}" "${RESET}"
+  printf '  %-24s %s\n' 'GSD_QUEUE_FILE'      "Path to QUEUE.md (default: ~/dev/punchlab/QUEUE.md)"
+  printf '  %-24s %s\n' 'GSD_LOG_DIR'         "Log directory (default: /tmp)"
+  printf '  %-24s %s\n' 'GSD_STUCK_THRESHOLD' "Stuck threshold in minutes (default: 30)"
+  printf '  %-24s %s\n' 'NO_COLOR'            "Disable ANSI colors (https://no-color.org/)"
+  printf '\n%sExamples:%s\n' "${BOLD}" "${RESET}"
+  printf '  %s                        # Show dashboard\n' "${PROG_NAME}"
+  printf '  %s --verbose              # Full tables with all columns\n' "${PROG_NAME}"
+  printf '  %s --json | jq .summary  # Machine-readable output\n' "${PROG_NAME}"
+  printf '  %s stuck --kill          # Kill stuck sessions\n' "${PROG_NAME}"
+  printf '  %s log my-session        # View session transcript\n' "${PROG_NAME}"
+}
+
+# ── Main Dispatch ──────────────────────────────────────────────────────────────
+
+main() {
+  setup_colors
+
+  # Runtime state (not configuration — initialized here, not as global constants)
+  local VERBOSE=false
+  local JSON_OUTPUT=false
+
+  # Parse global flags
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --verbose|-v)
+        VERBOSE=true
+        shift
+        ;;
+      --json)
+        JSON_OUTPUT=true
+        # Disable colors in JSON mode (§3.1.5)
+        RED='' GREEN='' YELLOW='' BLUE='' CYAN=''
+        BOLD='' DIM='' BOLD_RED='' RESET=''
+        shift
+        ;;
+      --help|-h)
+        usage
+        return 0
+        ;;
+      --version)
+        printf '%s\n' "${PROG_NAME} ${VERSION}"
+        return 0
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -*)
+        die_usage "Unknown option: $1"
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  # Export runtime state so subcommands can see it
+  export VERBOSE JSON_OUTPUT
+
+  local cmd="${1:-status}"
+  shift || true
+
+  # Check dependencies before dispatching (fail fast)
+  check_deps
+
+  # Dispatch to subcommand
+  case "${cmd}" in
+    status)       cmd_status "$@" ;;
+    queue|q)      cmd_queue "$@" ;;
+    stuck)        cmd_stuck "$@" ;;
+    log)          cmd_log "$@" ;;
+    tail)         cmd_tail "$@" ;;
+    help)         usage ;;
+    *)            die_usage "Unknown command: ${cmd}. Run '${PROG_NAME} --help' for usage." ;;
+  esac
+}
+
+main "$@"
