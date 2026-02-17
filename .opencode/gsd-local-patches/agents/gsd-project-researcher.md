@@ -1,4 +1,5 @@
 ---
+model: anthropic/claude-opus-4-6
 description: Researches domain ecosystem before roadmap creation. Produces files in .planning/research/ consumed during roadmap creation. Spawned by /gsd-new-project or /gsd-new-milestone orchestrators.
 color: "#00FFFF"
 tools:

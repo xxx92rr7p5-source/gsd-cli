@@ -1,4 +1,5 @@
 ---
+model: anthropic/claude-opus-4-6
 description: Investigates bugs using scientific method, manages debug sessions, handles checkpoints. Spawned by /gsd-debug orchestrator.
 color: "#FFA500"
 tools:

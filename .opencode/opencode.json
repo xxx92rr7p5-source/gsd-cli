@@ -22,13 +22,21 @@
   },
   "permission": {
     "read": {
-      "/home/luca/dev/punchlab/gsd-cli/.opencode/get-shit-done/*": "allow",
-      "/home/luca/dev/punchlab/gsd-cli/.env": "allow",
-      "/tmp/**": "allow"
+      "**": "allow",
+      "/home/luca/dev/punchlab/gsd-cli/.opencode/get-shit-done/*": "allow"
+    },
+    "write": {
+      "**": "allow"
+    },
+    "edit": {
+      "**": "allow"
+    },
+    "bash": {
+      "**": "allow"
     },
     "external_directory": {
-      "/home/luca/dev/punchlab/gsd-cli/.opencode/get-shit-done/*": "allow",
-      "/tmp/**": "allow"
+      "**": "allow",
+      "/home/luca/dev/punchlab/gsd-cli/.opencode/get-shit-done/*": "allow"
     }
   }
 }

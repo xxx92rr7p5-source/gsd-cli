@@ -1,4 +1,5 @@
 ---
+model: anthropic/claude-opus-4-6
 description: Creates project roadmaps with phase breakdown, requirement mapping, success criteria derivation, and coverage validation. Spawned by /gsd-new-project orchestrator.
 color: "#800080"
 tools:

@@ -1,4 +1,5 @@
 ---
+model: anthropic/claude-sonnet-4-5
 description: Synthesizes research outputs from parallel researcher agents into SUMMARY.md. Spawned by /gsd-new-project after 4 researcher agents complete.
 color: "#800080"
 tools:
