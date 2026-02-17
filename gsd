@@ -435,12 +435,15 @@ log_usage() {
   printf '%sUsage:%s %s log <session> [options]\n\n' "${BOLD}" "${RESET}" "${PROG_NAME}"
   printf 'Show a readable transcript of an opencode session.\n\n'
   printf '%sArguments:%s\n' "${BOLD}" "${RESET}"
-  printf '  %-20s %s\n' '<session>' 'Session name or ID to view'
+  printf '  %-20s %s\n' '<session>' 'Session name (title) or ID to view'
   printf '\n%sOptions:%s\n' "${BOLD}" "${RESET}"
+  printf '  %-20s %s\n' '--json'     'Output as JSON'
   printf '  %-20s %s\n' '-h, --help' 'Show this help message'
   printf '\n%sExamples:%s\n' "${BOLD}" "${RESET}"
   printf '  %s log my-session\n' "${PROG_NAME}"
-  printf '  %s log abc123\n' "${PROG_NAME}"
+  printf '  %s log gsd-cli-exec-2\n' "${PROG_NAME}"
+  printf '  %s log ses_abc123\n' "${PROG_NAME}"
+  printf '  %s log my-session --json | jq .messages\n' "${PROG_NAME}"
 }
 
 tail_usage() {
@@ -956,22 +959,109 @@ cmd_stuck() {
 
 # cmd_log — show a readable session transcript
 cmd_log() {
+  local session=""
+  local end_of_opts=false
+
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --help|-h) log_usage; return 0 ;;
-      --) shift; break ;;
+      --json)
+        JSON_OUTPUT=true
+        RED='' GREEN='' YELLOW='' BLUE='' CYAN=''
+        BOLD='' DIM='' BOLD_RED='' RESET=''
+        shift ;;
+      --) end_of_opts=true; shift; break ;;
       -*) die_usage "Unknown option for 'log': $1" ;;
-      *)  break ;;
+      *)
+        # First non-flag arg is the session name
+        if [[ -z "${session}" ]]; then
+          session="$1"
+          shift
+        else
+          break
+        fi
+        ;;
     esac
   done
 
-  local session="${1:-}"
+  # §2.4.1 — require session name positional argument
   if [[ -z "${session}" ]]; then
     die_usage "Missing required argument: <session>"
   fi
 
-  printf 'Session log for: %s\n' "${session}"
-  printf 'Log viewer coming in a future plan\n'
+  # Resolve session title/ID → session ID (§2.4.2, §2.4.5)
+  get_sessions
+  local session_id
+  session_id=$(printf '%s' "${SESSION_DATA}" | \
+    jq -r --arg q "${session}" \
+    'first(.[] | select(.title == $q or .id == $q) | .id) // empty' 2>/dev/null)
+
+  if [[ -z "${session_id}" ]]; then
+    die "Session not found: ${session}"
+  fi
+
+  # Export session data (§2.4.2)
+  local export_json
+  export_json=$(opencode export "${session_id}" 2>/dev/null) || \
+    die "Failed to export session: ${session}"
+
+  if [[ -z "${export_json}" ]]; then
+    die "Session export returned empty: ${session}"
+  fi
+
+  # JSON output mode (§3.5)
+  if [[ "${JSON_OUTPUT:-false}" == "true" ]]; then
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    local messages_json
+    messages_json=$(printf '%s' "${export_json}" | jq -c '
+      [.messages[] |
+       .info.role as $role |
+       .parts[] |
+       select(.type == "text") |
+       {role: $role, text: .text}]
+    ' 2>/dev/null) || messages_json="[]"
+    jq -n \
+      --arg ts "${timestamp}" \
+      --arg id "${session_id}" \
+      --arg title "${session}" \
+      --argjson msgs "${messages_json}" \
+      '{timestamp: $ts, session_id: $id, session_title: $title, messages: $msgs}'
+    return 0
+  fi
+
+  # Human-readable output (§2.4.3 — strip raw JSON, present assistant messages readably)
+  printf '%s%s — Session Log%s\n' "${BOLD}" "${session}" "${RESET}"
+  printf '%s%s%s\n\n' "${DIM}" "$(printf '%.0s─' {1..60})" "${RESET}"
+
+  local prev_role=""
+  while IFS=$'\t' read -r part_role part_type part_text part_tool part_status; do
+    if [[ "${part_type}" == "text" ]]; then
+      if [[ "${part_role}" != "${prev_role}" ]]; then
+        if [[ "${part_role}" == "user" ]]; then
+          printf '%s╔ User ═══════════════════════════════════════════╗%s\n' "${CYAN}" "${RESET}"
+        else
+          printf '%s╔ Assistant ══════════════════════════════════════╗%s\n' "${GREEN}" "${RESET}"
+        fi
+        prev_role="${part_role}"
+      fi
+      printf '%s\n' "${part_text}"
+    elif [[ "${part_type}" == "tool" && -n "${part_tool}" ]]; then
+      printf '  %s[%s] %s%s\n' "${DIM}" "${part_tool}" "${part_status}" "${RESET}"
+    fi
+  done < <(printf '%s' "${export_json}" | jq -r '
+    .messages[] |
+    .info.role as $role |
+    .parts[] |
+    if .type == "text" then
+      [$role, "text", .text, "", ""]
+    elif .type == "tool" and (.tool != null) then
+      [$role, "tool", "", (.tool), (.state.status // "")]
+    else
+      empty
+    end |
+    @tsv
+  ' 2>/dev/null)
 }
 
 # cmd_tail — live-follow a session's output
