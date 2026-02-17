@@ -166,7 +166,7 @@ SESSION_DATA="[]"
 # get_sessions — call opencode session list once and cache result in SESSION_DATA
 get_sessions() {
   local json
-  json=$(opencode session list --json 2>/dev/null) || json="[]"
+  json=$(opencode session list --format json 2>/dev/null) || json="[]"
 
   # Validate the output is a valid JSON array
   if printf '%s' "${json}" | jq -e 'type == "array"' &>/dev/null; then
@@ -180,39 +180,53 @@ get_sessions() {
 # get_running_sessions — filter SESSION_DATA for running/active sessions
 # Outputs a JSON array of running sessions
 get_running_sessions() {
-  # Try filtering by status field; fall back to all sessions if no status field exists
-  local running
-  running=$(printf '%s' "${SESSION_DATA}" | \
-    jq -c '[.[] | select(.status == "running" or .status == "active")]' 2>/dev/null) || running="[]"
-
-  # If all statuses are null/missing, return all sessions as potentially running
+  # opencode session list has no 'status' field — cross-reference with PID files
+  # A session is "running" if its title matches a live PID file
+  local result="[]"
   local count
-  count=$(printf '%s' "${running}" | jq 'length' 2>/dev/null) || count=0
-  local total
-  total=$(printf '%s' "${SESSION_DATA}" | jq 'length' 2>/dev/null) || total=0
+  count=$(printf '%s' "${SESSION_DATA}" | jq 'length' 2>/dev/null) || count=0
+  [[ "${count}" -eq 0 ]] && printf '%s' "${result}" && return
 
-  if [[ "${count}" -eq 0 ]] && [[ "${total}" -gt 0 ]]; then
-    # Check if sessions have a status field at all
-    local has_status
-    has_status=$(printf '%s' "${SESSION_DATA}" | jq '[.[] | has("status")] | any' 2>/dev/null) || has_status="false"
-    if [[ "${has_status}" == "false" ]]; then
-      # No status field — return all sessions
-      printf '%s' "${SESSION_DATA}"
-      return
+  # Build a list of active session titles from PID files
+  local active_titles=()
+  local pid_file
+  for pid_file in "${LOG_DIR}"/gsd-*-pid; do
+    [[ -f "${pid_file}" ]] || continue
+    local title
+    title="${pid_file##*/gsd-}"
+    title="${title%-pid}"
+    local pid
+    pid=$(< "${pid_file}")
+    if kill -0 "${pid}" 2>/dev/null; then
+      active_titles+=("${title}")
     fi
+  done
+
+  if [[ ${#active_titles[@]} -eq 0 ]]; then
+    printf '%s' "${result}"
+    return
   fi
 
-  printf '%s' "${running}"
+  # Filter SESSION_DATA to sessions matching an active title
+  local titles_json
+  titles_json=$(printf '%s\n' "${active_titles[@]}" | jq -Rsc '[split("\n")[] | select(length > 0)]')
+  result=$(printf '%s' "${SESSION_DATA}" | \
+    jq -c --argjson titles "${titles_json}" \
+    '[.[] | select(.title as $t | $titles | contains([$t]))]' 2>/dev/null) || result="[]"
+  printf '%s' "${result}"
 }
 
 # get_completed_sessions — extract completed/finished sessions, last 5, newest first
 get_completed_sessions() {
+  # Return the last 5 sessions that are NOT currently running (have no live PID file)
+  # Sort by .updated (epoch ms), newest first
   local completed
   completed=$(printf '%s' "${SESSION_DATA}" | \
-    jq -c '[.[] | select(.status == "completed" or .status == "done" or .status == "finished" or .status == "failed")]
-           | sort_by(.updated_at // .created_at // "")
-           | reverse
-           | .[0:5]' 2>/dev/null) || completed="[]"
+    jq -c '[.] |
+           flatten |
+           sort_by(.updated) |
+           reverse |
+           .[0:5]' 2>/dev/null) || completed="[]"
   printf '%s' "${completed}"
 }
 
@@ -558,11 +572,11 @@ cmd_status() {
         printf '%-20s %-10s %-8s %-12s %-15s\n' \
           "${short_sess}" "${status}" "${pid}" "${dur}" "${updated}"
       done < <(printf '%s' "${running_json}" | jq -r '.[] | [
-        (.id // .name // "unknown"),
-        (.status // "running"),
-        (.pid // "N/A" | tostring),
-        (.duration // "N/A" | tostring),
-        (.updated_at // "N/A")
+        (.title // .id // "unknown"),
+        "running",
+        "N/A",
+        "N/A",
+        (.updated // 0 | . / 1000 | todate)
       ] | @tsv' 2>/dev/null)
       printf '\n'
     fi
@@ -599,9 +613,9 @@ cmd_status() {
         esac
         printf '%s%-20s %-10s %s%s\n' "${color}" "${short_sess}" "${status}" "${finished}" "${RESET}"
       done < <(printf '%s' "${completed_json}" | jq -r '.[] | [
-        (.id // .name // "unknown"),
-        (.status // "done"),
-        (.updated_at // "N/A")
+        (.title // .id // "unknown"),
+        "done",
+        (.updated // 0 | . / 1000 | todate)
       ] | @tsv' 2>/dev/null)
       printf '\n'
     fi
@@ -612,7 +626,7 @@ cmd_status() {
       print_header "Running"
       while IFS= read -r sess; do
         printf '  %s●%s %s\n' "${GREEN}" "${RESET}" "${sess}"
-      done < <(printf '%s' "${running_json}" | jq -r '.[] | (.id // .name // "unknown")' 2>/dev/null)
+      done < <(printf '%s' "${running_json}" | jq -r '.[] | (.title // .id // "unknown")' 2>/dev/null)
       printf '\n'
     else
       printf '%sNo running sessions%s\n\n' "${DIM}" "${RESET}"
@@ -643,7 +657,7 @@ cmd_status() {
       print_header "Recently Completed"
       while IFS= read -r line; do
         printf '  %s✓%s %s\n' "${DIM}" "${RESET}" "${line}"
-      done < <(printf '%s' "${completed_json}" | jq -r '.[] | (.id // .name // "unknown") + " (" + (.status // "done") + ")"' 2>/dev/null)
+      done < <(printf '%s' "${completed_json}" | jq -r '.[] | (.title // .id // "unknown") + " (done)"' 2>/dev/null)
       printf '\n'
     fi
   fi
