@@ -1,12 +1,34 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "context7": {
+      "type": "remote",
+      "url": "https://mcp.context7.com/mcp"
+    }
+  },
+  "agent": {
+    "build": {
+      "model": "anthropic/claude-sonnet-4-5"
+    },
+    "plan": {
+      "model": "anthropic/claude-opus-4-6"
+    },
+    "general": {
+      "model": "anthropic/claude-opus-4-6"
+    },
+    "explore": {
+      "model": "anthropic/claude-opus-4-6"
+    }
+  },
   "permission": {
     "read": {
-      "/home/luca/dev/punchlab/baby-predictor/.opencode/get-shit-done/*": "allow",
-      "/home/luca/dev/punchlab/baby-predictor/.env": "allow"
+      "/home/luca/dev/punchlab/gsd-cli/.opencode/get-shit-done/*": "allow",
+      "/home/luca/dev/punchlab/gsd-cli/.env": "allow",
+      "/tmp/**": "allow"
     },
     "external_directory": {
-      "/home/luca/dev/punchlab/baby-predictor/.opencode/get-shit-done/*": "allow"
+      "/home/luca/dev/punchlab/gsd-cli/.opencode/get-shit-done/*": "allow",
+      "/tmp/**": "allow"
     }
   }
 }
