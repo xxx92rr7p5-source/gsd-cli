@@ -1,0 +1,9 @@
+{
+  "permission": {
+    "read": { "**": "allow" },
+    "write": { "**": "allow" },
+    "edit": { "**": "allow" },
+    "bash": { "**": "allow" },
+    "external_directory": { "**": "allow" }
+  }
+}
