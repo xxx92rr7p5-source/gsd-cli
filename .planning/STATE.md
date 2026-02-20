@@ -2,10 +2,10 @@
 
 ## Current Position
 
-Phase: 3 of 3 (Log, Tail & Installation)
+Phase: 3 of 4 (Log, Tail & Installation)
 Plan: 0/1 ready to execute — Phase 3 planned
 Status: Phases 1+2 complete; Phase 3 research + plan complete, ready to execute
-Last activity: 2026-02-17
+Last activity: 2026-02-20
 
 Progress: [██████░░░░] 66% (Phases 1+2 complete, Phase 3 planned)
 
@@ -16,6 +16,7 @@ Progress: [██████░░░░] 66% (Phases 1+2 complete, Phase 3 pla
 | 1 | Foundation & Status Dashboard | ✅ Complete |
 | 2 | Queue & Stuck Commands | ✅ Complete |
 | 3 | Log, Tail & Installation | 📋 Planned (03-01-PLAN.md ready) |
+| 4 | TypeScript rewrite with queue runner | 🆕 Not planned |
 
 ## Decisions Made
 
@@ -43,6 +44,12 @@ Progress: [██████░░░░] 66% (Phases 1+2 complete, Phase 3 pla
 - Phase 3: inotifywait not available on this system — gsd tail uses `tail -f` directly
 - Phase 3: gsd log accepts session `title` or `id` (both looked up via get_sessions())
 - Phase 3: single plan for all Phase 3 deliverables (log, tail, install, bug fixes, polish)
+
+## Accumulated Context
+
+### Roadmap Evolution
+
+- Phase 4 added: TypeScript rewrite with queue runner per requirements/queue-runner-migration.md
 
 ## Stopped At
 

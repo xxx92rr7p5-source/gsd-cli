@@ -72,3 +72,14 @@ Plans:
 - [ ] 03-01-PLAN.md — Fix get_sessions() bug, implement cmd_log, cmd_tail, create install.sh, final polish
 
 **Success criteria:** `gsd log my-session` prints readable session transcript. `gsd tail my-session` streams live output and exits cleanly on Ctrl-C. `./install.sh` produces a working `gsd` command from any terminal. All requirements in §1–§10 are met.
+
+---
+
+## Phase 4: TypeScript rewrite with queue runner per requirements/queue-runner-migration.md
+
+**Goal:** [To be planned]
+**Depends on:** Phase 3
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 4 to break down)
